@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.deepeval/
+.venv/
+venv/
+
+# SQLite runtime data
+backend/data/
+*.sqlite3
+logs/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Local secrets
+.env
+.env.*
