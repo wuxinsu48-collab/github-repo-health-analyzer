@@ -85,6 +85,138 @@ def test_analyze_endpoint_returns_deep_core_score(monkeypatch, tmp_path):
     assert data["final_score"] == payload["core_score"]["score"]
 
 
+def test_analyze_endpoint_stores_agent_deep_score_when_ai_config_is_present(monkeypatch, tmp_path):
+    from app.models import AgentCriticReview, AgentDeepScore, AgentDimensionScore, AgentObservation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "src").mkdir()
+    (repo / "src" / "main.py").write_text("def main():\n    return 1\n", encoding="utf-8")
+    (repo / "README.md").write_text("# Demo\n", encoding="utf-8")
+
+    async def fake_fetch_repo_evidence(self, owner, name):
+        return {
+            "repo": {
+                "full_name": f"{owner}/{name}",
+                "html_url": f"https://github.com/{owner}/{name}",
+                "description": "demo",
+                "stars": 5,
+                "forks": 2,
+                "watchers": 5,
+                "subscribers": 1,
+                "open_issues": 0,
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-06-01T00:00:00Z",
+                "pushed_at": "2026-06-01T00:00:00Z",
+                "archived": False,
+                "disabled": False,
+                "fork": False,
+                "license": None,
+                "default_branch": "main",
+                "size": 10,
+                "topics": [],
+                "homepage": "",
+            },
+            "languages": {"Python": 100},
+            "community": {"readme": True, "license": False, "security": False},
+            "commits": [],
+            "releases": [],
+            "tree": [],
+            "readme_excerpt": "",
+            "config_summary": {},
+        }
+
+    async def fake_run_agent_deep_scoring(**kwargs):
+        kwargs["progress"](
+            {
+                "id": "project_classifier",
+                "label": "project_classifier",
+                "status": "completed",
+                "detail": "classified",
+                "kind": "node",
+            }
+        )
+        return AgentDeepScore(
+            score=81,
+            confidence="high",
+            project_profile={"project_type": "library", "primary_language": "Python"},
+            rubric={"dimensions": {"testing": 15}, "rationale": "test rubric"},
+            exploration_steps=[
+                AgentObservation(
+                    step=1,
+                    thought="read docs",
+                    action="read_file",
+                    target="README.md",
+                    dimension="documentation",
+                    result_summary="read README",
+                    evidence=[],
+                )
+            ],
+            evidence_pool=[],
+            curated_evidence={"documentation": ["README.md"]},
+            dimensions={
+                "testing": AgentDimensionScore(
+                    dimension="testing",
+                    score=12,
+                    max_score=15,
+                    confidence="high",
+                    reasoning="Tests are present.",
+                    evidence_refs=[],
+                    strengths=[],
+                    risks=[],
+                    recommendations=[],
+                )
+            },
+            critic_review=AgentCriticReview(
+                verdict="ok",
+                concerns=[],
+                evidence_gaps=[],
+                score_adjustments={},
+            ),
+            calibrated_dimensions={"testing": 12},
+            final_report={
+                "summary": "Agent report",
+                "strengths": ["Local evidence"],
+                "risks": ["None"],
+                "recommendations": ["Keep improving"],
+            },
+            trace=["project_classifier"],
+        )
+
+    progress_events = []
+
+    def progress(step_id, status, detail="", metadata=None):
+        progress_events.append((step_id, status, detail, metadata))
+
+    monkeypatch.setattr("app.main.GitHubClient.fetch_repo_evidence", fake_fetch_repo_evidence)
+    monkeypatch.setattr("app.main.clone_repository", lambda owner, name, repo_url: repo)
+    monkeypatch.setattr("app.main.cleanup_repository", lambda path: None)
+    monkeypatch.setattr("app.main.run_agent_deep_scoring", fake_run_agent_deep_scoring)
+
+    from app.main import run_analysis_pipeline
+
+    report = asyncio.run(
+        run_analysis_pipeline(
+            AnalyzeRequest(
+                repo_url="https://github.com/acme/demo",
+                ai={"base_url": "https://api.example.test", "api_key": "placeholder", "model": "fake-model"},
+            ),
+            progress,
+        )
+    )
+
+    payload = report["payload"]
+    assert payload["agent_deep_score"]["score"] == 81
+    assert payload["deep_ai_assessment"]["score"] == 81
+    assert payload["deep_ai_assessment"]["dimension_reviews"]["testing"] == "Tests are present."
+    assert payload["ai_error"] is None
+    assert report["ai_score"] == 81
+    assert any(
+        step_id == "ai_review" and metadata and metadata["event"]["id"] == "project_classifier"
+        for step_id, _, _, metadata in progress_events
+    )
+
+
 def test_analyze_endpoint_retries_public_repo_without_invalid_optional_token(monkeypatch, tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()

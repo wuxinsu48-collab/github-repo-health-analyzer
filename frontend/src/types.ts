@@ -118,6 +118,75 @@ export interface DeepAiAssessment {
   recommendations: string[]
 }
 
+export interface AgentEvidenceItem {
+  id?: string
+  step?: number
+  action?: string
+  dimension?: string
+  file?: string | null
+  line_start?: number | null
+  line_end?: number | null
+  total_lines?: number | null
+  snippet?: string
+  match?: string
+  reason?: string
+}
+
+export interface AgentObservation {
+  step: number
+  thought: string
+  action: string
+  target: string
+  dimension: string
+  result_summary: string
+  evidence: AgentEvidenceItem[]
+}
+
+export interface AgentDimensionScore {
+  dimension: string
+  score: number
+  max_score: number
+  confidence: 'low' | 'medium' | 'high'
+  reasoning: string
+  evidence_refs: string[]
+  strengths: string[]
+  risks: string[]
+  recommendations: string[]
+}
+
+export interface AgentCriticReview {
+  verdict: string
+  concerns: string[]
+  evidence_gaps: string[]
+  score_adjustments: Record<string, number>
+}
+
+export interface AgentDeepScore {
+  score: number
+  confidence: 'low' | 'medium' | 'high'
+  project_profile: Record<string, unknown>
+  rubric: {
+    dimensions?: Record<string, number>
+    rationale?: string
+    [key: string]: unknown
+  }
+  exploration_steps: AgentObservation[]
+  evidence_pool: AgentEvidenceItem[]
+  curated_evidence: Record<string, unknown>
+  dimensions: Record<string, AgentDimensionScore>
+  critic_review: AgentCriticReview
+  calibrated_dimensions: Record<string, number>
+  final_report: {
+    summary?: string
+    strengths?: string[]
+    risks?: string[]
+    recommendations?: string[]
+    calibration_rationale?: string
+    [key: string]: unknown
+  }
+  trace: string[]
+}
+
 export interface ExplorationEvidence {
   step: number
   action: string
@@ -209,6 +278,7 @@ export interface ReportPayload {
   risks: string[]
   recommendations: string[]
   github_warning?: string | null
+  agent_deep_score?: AgentDeepScore | null
   deep_ai_assessment: DeepAiAssessment | null
   rule_score: RuleScore
   ai_assessment: AiAssessment | null

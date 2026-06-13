@@ -9,10 +9,12 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.db import delete_report, get_report, init_db, insert_report, list_reports
 from app.models import (
+    AgentDeepScore,
     AnalysisJobResponse,
     AnalyzeRequest,
     AiConfig,
     ConnectionTestResponse,
+    DeepAiAssessment,
     GitHubTestRequest,
     RecentReport,
     ReportResponse,
@@ -26,7 +28,8 @@ from app.services.analysis_jobs import (
     skip_step,
     update_step,
 )
-from app.services.ai import call_deep_ai_assessment, test_ai_connection
+from app.services.agent_scoring import run_agent_deep_scoring
+from app.services.ai import test_ai_connection
 from app.services.deep_analysis import analyze_repository_index
 from app.services.github import GitHubApiError, GitHubClient, parse_github_repo_url
 from app.services.repo_indexer import index_repository
@@ -82,6 +85,22 @@ def _progress(
         progress(step_id, status, detail, metadata)
 
 
+def _agent_score_to_deep_assessment(agent_score: AgentDeepScore) -> DeepAiAssessment:
+    final_report = agent_score.final_report or {}
+    return DeepAiAssessment(
+        score=agent_score.score,
+        confidence=agent_score.confidence,
+        summary=str(final_report.get("summary") or "AI Agent deep scoring completed."),
+        dimension_reviews={
+            key: value.reasoning
+            for key, value in agent_score.dimensions.items()
+        },
+        strengths=[str(item) for item in final_report.get("strengths", []) if item],
+        risks=[str(item) for item in final_report.get("risks", []) if item],
+        recommendations=[str(item) for item in final_report.get("recommendations", []) if item],
+    )
+
+
 async def run_analysis_pipeline(request: AnalyzeRequest, progress: ProgressCallback | None = None) -> dict:
     _progress(progress, "parse_repo", "running", "解析用户输入的 GitHub 仓库地址")
     try:
@@ -116,7 +135,11 @@ async def run_analysis_pipeline(request: AnalyzeRequest, progress: ProgressCallb
             raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
 
     local_repo = None
+    local_index = None
     deep_report = None
+    agent_deep_score = None
+    deep_ai_assessment = None
+    ai_error = None
     try:
         _progress(progress, "clone_repo", "running", "clone 到本地临时工作区，只读分析")
         local_repo = await asyncio.to_thread(clone_repository, owner, repo, evidence.get("repo", {}).get("html_url"))
@@ -126,10 +149,10 @@ async def run_analysis_pipeline(request: AnalyzeRequest, progress: ProgressCallb
         local_index = await asyncio.to_thread(index_repository, local_repo)
         _progress(progress, "index_repo", "completed", f"扫描 {local_index.file_count} 个文件")
 
-        _progress(progress, "langgraph_score", "running", "LangGraph 生成探索计划，使用只读工具收集证据并计算核心 100 分")
+        _progress(progress, "langgraph_score", "running", "基础规则评分生成探索计划，使用只读工具收集证据并计算核心 100 分")
 
         def langgraph_progress(event: dict) -> None:
-            detail = event.get("detail") or event.get("label") or "LangGraph 内部事件"
+            detail = event.get("detail") or event.get("label") or "基础规则评分内部事件"
             _progress(progress, "langgraph_score", "running", str(detail), {"event": event})
 
         deep_report = await asyncio.to_thread(
@@ -138,7 +161,31 @@ async def run_analysis_pipeline(request: AnalyzeRequest, progress: ProgressCallb
             github_evidence=evidence,
             progress=langgraph_progress,
         )
-        _progress(progress, "langgraph_score", "completed", f"核心分 {deep_report.core_score.score}")
+        _progress(progress, "langgraph_score", "completed", f"基础规则评分 {deep_report.core_score.score}")
+
+        if request.ai:
+            _progress(progress, "ai_review", "running", "AI Agent using safe tools to explore local code.")
+
+            def agent_progress(event: dict) -> None:
+                detail = event.get("detail") or event.get("label") or "AI Agent internal event"
+                _progress(progress, "ai_review", "running", str(detail), {"event": event})
+
+            try:
+                agent_deep_score = await run_agent_deep_scoring(
+                    config=request.ai,
+                    repo_root=local_repo,
+                    index=local_index,
+                    github_evidence=evidence,
+                    core_report=deep_report,
+                    progress=agent_progress,
+                )
+                deep_ai_assessment = _agent_score_to_deep_assessment(agent_deep_score)
+                _progress(progress, "ai_review", "completed", f"AI Agent 深度评分 {agent_deep_score.score}")
+            except ValueError as exc:
+                ai_error = str(exc)
+                _progress(progress, "ai_review", "failed", ai_error)
+        else:
+            _progress(progress, "ai_review", "skipped", "未填写完整 AI 配置，跳过 AI Agent 深度评分")
     except RepositoryCloneError as exc:
         active_step = "clone_repo" if local_repo is None else "index_repo"
         _progress(progress, active_step, "failed", str(exc))
@@ -155,41 +202,6 @@ async def run_analysis_pipeline(request: AnalyzeRequest, progress: ProgressCallb
         key: round(value.score / value.max_score * 100)
         for key, value in deep_report.core_score.dimensions.items()
     }
-
-    deep_ai_assessment = None
-    ai_error = None
-    if request.ai:
-        _progress(progress, "ai_review", "running", "AI 基于本地证据包做独立评分")
-        try:
-            ai_evidence = {
-                "repo": {
-                    "full_name": evidence.get("repo", {}).get("full_name"),
-                    "description": evidence.get("repo", {}).get("description"),
-                    "default_branch": evidence.get("repo", {}).get("default_branch"),
-                },
-                "local_index": deep_report.local_index,
-                "exploration_notes": deep_report.exploration_notes,
-                "evidence_pool": deep_report.evidence_pool[:80],
-                "community_reference": deep_report.community_reference.model_dump(),
-                "analysis_trace": deep_report.analysis_trace,
-                "deterministic_findings": {
-                    "dimension_reasons": {
-                        key: value.reason
-                        for key, value in deep_report.core_score.dimensions.items()
-                    },
-                    "risk_flags": deep_report.core_score.risk_flags,
-                    "strengths": deep_report.strengths,
-                    "risks": deep_report.risks,
-                    "recommendations": deep_report.recommendations,
-                },
-            }
-            deep_ai_assessment = await call_deep_ai_assessment(request.ai, ai_evidence)
-            _progress(progress, "ai_review", "completed", f"AI 独立分 {deep_ai_assessment.score}")
-        except ValueError as exc:
-            ai_error = str(exc)
-            _progress(progress, "ai_review", "failed", ai_error)
-    else:
-        _progress(progress, "ai_review", "skipped", "未填写完整 AI 配置，跳过 AI 独立审阅")
 
     final_score = core_score
 
@@ -213,6 +225,7 @@ async def run_analysis_pipeline(request: AnalyzeRequest, progress: ProgressCallb
         "risks": deep_report.risks,
         "recommendations": deep_report.recommendations,
         "github_warning": github_warning,
+        "agent_deep_score": agent_deep_score.model_dump() if agent_deep_score else None,
         "deep_ai_assessment": deep_ai_assessment.model_dump() if deep_ai_assessment else None,
         "rule_score": {
             "rule_score": core_score,

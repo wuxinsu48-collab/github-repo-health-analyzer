@@ -23,6 +23,7 @@ import {
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { deleteReport, getAnalyzeJob, getReport, listReports, startAnalyzeJob, testAi, testGitHub } from './api'
 import type {
+  AgentDimensionScore,
   AnalysisJobResponse,
   AnalysisJobEvent,
   AnalysisJobStep,
@@ -36,6 +37,7 @@ import type {
 use([BarChart, GaugeChart, PieChart, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer])
 
 type DrawerEvent = AnalysisJobEvent & { stepLabel: string }
+type ReportTab = 'rules' | 'agent'
 
 const repoUrl = ref('')
 const githubToken = ref('')
@@ -54,6 +56,7 @@ const errorMessage = ref('')
 const showScoringGuide = ref(false)
 const currentJob = ref<AnalysisJobResponse | null>(null)
 const deletingReportId = ref<number | null>(null)
+const activeReportTab = ref<ReportTab>('rules')
 let jobPollTimer: number | null = null
 
 const scoreChartEl = ref<HTMLDivElement | null>(null)
@@ -65,6 +68,7 @@ let dimensionChart: ECharts | null = null
 
 const repo = computed(() => currentReport.value?.payload.evidence.repo)
 const coreScore = computed(() => currentReport.value?.payload.core_score)
+const agentDeepScore = computed(() => currentReport.value?.payload.agent_deep_score ?? null)
 const deepAiAssessment = computed(() => currentReport.value?.payload.deep_ai_assessment)
 const localIndex = computed(() => currentReport.value?.payload.local_index)
 const explorationNotes = computed<ExplorationNote[]>(() => currentReport.value?.payload.exploration_notes ?? [])
@@ -78,6 +82,17 @@ const dimensionLabels: Record<string, string> = {
   documentation: '文档质量',
   security: '安全风险',
   maintainability: '可维护性',
+}
+
+const agentDimensionOrder = ['functionality', 'architecture_quality', 'engineering', 'testing', 'security', 'documentation', 'maintenance']
+const agentDimensionLabels: Record<string, string> = {
+  functionality: '功能完整性',
+  architecture_quality: '架构质量',
+  engineering: '工程完整度',
+  testing: '测试质量',
+  security: '安全风险',
+  documentation: '文档质量',
+  maintenance: '维护成本',
 }
 
 const aiFieldLabels: Record<string, string> = {
@@ -124,8 +139,8 @@ const activeStep = computed(() => {
   if (runningStep) return runningStep
   return [...jobSteps.value].reverse().find((step) => step.status === 'completed' || step.status === 'failed' || step.status === 'skipped') ?? null
 })
-const drawerEvidenceCount = computed(() => currentReport.value?.payload.evidence_pool?.length ?? 0)
-const drawerExplorationCount = computed(() => currentReport.value?.payload.exploration_notes?.length ?? drawerEvents.value.length)
+const drawerEvidenceCount = computed(() => agentDeepScore.value?.evidence_pool?.length ?? currentReport.value?.payload.evidence_pool?.length ?? 0)
+const drawerExplorationCount = computed(() => agentDeepScore.value?.exploration_steps?.length ?? currentReport.value?.payload.exploration_notes?.length ?? drawerEvents.value.length)
 
 function statusLabel(status: string): string {
   const labels: Record<string, string> = {
@@ -205,6 +220,63 @@ function dimensionEntries(dimensions: Record<string, ScoreDimension> | undefined
   return dimensionOrder
     .map((key) => ({ key, label: dimensionLabels[key], dimension: dimensions[key] }))
     .filter((item) => item.dimension)
+}
+
+function agentDimensionEntries(dimensions: Record<string, AgentDimensionScore> | undefined) {
+  if (!dimensions) return []
+  const known = agentDimensionOrder
+    .map((key) => ({ key, label: agentDimensionLabels[key], dimension: dimensions[key] }))
+    .filter((item) => item.dimension)
+  const extra = Object.entries(dimensions)
+    .filter(([key]) => !agentDimensionOrder.includes(key))
+    .map(([key, dimension]) => ({ key, label: agentDimensionLabels[key] ?? dimensionLabels[key] ?? key, dimension }))
+  return [...known, ...extra]
+}
+
+const agentDimensionItems = computed(() => agentDimensionEntries(agentDeepScore.value?.dimensions))
+
+const agentRubricItems = computed(() => {
+  const dimensions = agentDeepScore.value?.rubric?.dimensions ?? {}
+  return agentDimensionOrder
+    .filter((key) => typeof dimensions[key] === 'number')
+    .map((key) => ({ key, label: agentDimensionLabels[key], value: dimensions[key] }))
+})
+
+const agentProfileItems = computed(() => {
+  const profile = agentDeepScore.value?.project_profile ?? {}
+  return [
+    { key: 'project_type', label: '项目类型', value: formatUnknown(profile.project_type) },
+    { key: 'primary_language', label: '主语言', value: formatUnknown(profile.primary_language) },
+    { key: 'frameworks', label: '框架', value: formatUnknown(profile.frameworks) },
+    { key: 'package_managers', label: '包管理', value: formatUnknown(profile.package_managers) },
+  ].filter((item) => item.value !== '-')
+})
+
+const agentEvidencePreview = computed(() => agentDeepScore.value?.evidence_pool?.slice(0, 10) ?? [])
+
+function formatUnknown(value: unknown): string {
+  if (Array.isArray(value)) {
+    return value.length ? value.map((item) => String(item)).join('、') : '-'
+  }
+  if (typeof value === 'string') return value || '-'
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  return '-'
+}
+
+function confidenceLabel(value: string | undefined): string {
+  const labels: Record<string, string> = { low: '低', medium: '中', high: '高' }
+  return value ? labels[value] ?? value : '-'
+}
+
+function calibratedScore(key: string, dimension: AgentDimensionScore): number {
+  return agentDeepScore.value?.calibrated_dimensions?.[key] ?? dimension.score
+}
+
+function evidenceLocation(item: { file?: string | null; line_start?: number | null; line_end?: number | null }): string {
+  if (!item.file) return '结构证据'
+  if (!item.line_start) return item.file
+  if (item.line_end && item.line_end !== item.line_start) return `${item.file}:${item.line_start}-${item.line_end}`
+  return `${item.file}:${item.line_start}`
 }
 
 function renderCharts() {
@@ -427,7 +499,23 @@ function resizeCharts() {
   dimensionChart?.resize()
 }
 
-watch(() => currentReport.value?.id, renderCharts)
+function selectReportTab(tab: ReportTab) {
+  activeReportTab.value = tab
+  if (tab === 'rules') {
+    nextTick(resizeCharts)
+  }
+}
+
+watch(() => currentReport.value?.id, () => {
+  activeReportTab.value = 'rules'
+  renderCharts()
+})
+
+watch(activeReportTab, (tab) => {
+  if (tab === 'rules') {
+    nextTick(resizeCharts)
+  }
+})
 
 onMounted(async () => {
   await refreshReports()
@@ -452,7 +540,7 @@ onUnmounted(() => {
         </div>
         <div>
           <h1>GitHub 仓库体检</h1>
-          <p>只读深度分析 + AI 独立审阅</p>
+          <p>基础规则评分 + AI Agent 深度评分</p>
         </div>
       </section>
 
@@ -564,7 +652,7 @@ onUnmounted(() => {
       <div v-if="!currentReport" class="empty-state">
         <Github :size="42" />
         <h2>输入公开仓库 URL 后开始体检</h2>
-        <p>后端会 clone 仓库到本地工作区，由 LangGraph 编排只读工具按需探索配置、文档、测试、源码和安全线索，再生成核心 100 分报告。</p>
+        <p>后端会 clone 仓库到本地临时工作区，基础规则评分走确定性扫描；AI Agent 深度评分会让模型自主调用只读工具探索代码并生成证据链。</p>
       </div>
 
       <template v-else>
@@ -589,14 +677,14 @@ onUnmounted(() => {
             <strong>{{ currentReport.final_score }}</strong>
             <div class="score-breakdown">
               <div>
-                <span>核心分</span>
+                <span>基础规则评分</span>
                 <b>{{ coreScore?.score ?? currentReport.final_score }}</b>
               </div>
               <div>
-                <span>AI 独立分</span>
-                <b>{{ deepAiAssessment?.score ?? '未生成' }}</b>
+                <span>AI Agent 深度评分</span>
+                <b>{{ agentDeepScore ? `${agentDeepScore.score} / 100` : '未生成' }}</b>
               </div>
-              <p>AI 独立分按同一六维标准审阅证据包，不参与核心分公式。</p>
+              <p>核心综合分仍来自基础规则评分；AI Agent 深度评分是独立参考，不参与核心分。</p>
             </div>
           </div>
         </header>
@@ -632,10 +720,34 @@ onUnmounted(() => {
           </div>
         </section>
 
-        <section class="chart-grid">
+        <nav class="report-tabs" aria-label="评分视图切换">
+          <button
+            type="button"
+            class="report-tab"
+            :class="{ active: activeReportTab === 'rules' }"
+            :aria-selected="activeReportTab === 'rules'"
+            @click="selectReportTab('rules')"
+          >
+            <span>基础规则评分</span>
+            <strong>{{ coreScore?.score ?? currentReport.final_score }} / 100</strong>
+          </button>
+          <button
+            type="button"
+            class="report-tab"
+            :class="{ active: activeReportTab === 'agent' }"
+            :aria-selected="activeReportTab === 'agent'"
+            @click="selectReportTab('agent')"
+          >
+            <span>AI Agent 深度评分</span>
+            <strong>{{ agentDeepScore ? `${agentDeepScore.score} / 100` : '未生成' }}</strong>
+          </button>
+        </nav>
+
+        <div v-show="activeReportTab === 'rules'" class="report-tab-panel" role="tabpanel" aria-label="基础规则评分">
+          <section class="chart-grid">
           <div class="chart-panel">
             <div class="panel-heading">
-              <h3>核心评分</h3>
+              <h3>基础规则评分</h3>
               <span>总分 100，不含社区热度</span>
             </div>
             <div ref="scoreChartEl" class="chart chart-score"></div>
@@ -656,9 +768,9 @@ onUnmounted(() => {
             </div>
             <div ref="dimensionChartEl" class="chart chart-wide"></div>
           </div>
-        </section>
+          </section>
 
-        <section class="details-grid">
+          <section class="details-grid">
           <div class="info-panel">
             <h3>本地结构信号</h3>
             <div class="signal-list">
@@ -678,14 +790,14 @@ onUnmounted(() => {
             <ul v-if="coreScore?.risk_flags.length" class="plain-list risk-list">
               <li v-for="item in coreScore.risk_flags" :key="item">{{ item }}</li>
             </ul>
-            <p v-else class="positive-note">核心评分没有发现明显高风险标记。</p>
+            <p v-else class="positive-note">基础规则评分没有发现明显高风险标记。</p>
             <ul class="plain-list">
               <li v-for="item in currentReport.payload.recommendations" :key="item">{{ item }}</li>
             </ul>
           </div>
-        </section>
+          </section>
 
-        <section class="dimension-evidence">
+          <section class="dimension-evidence">
           <div class="panel-heading">
             <h3>评分证据</h3>
             <span>每个维度保留可追溯片段</span>
@@ -702,9 +814,9 @@ onUnmounted(() => {
               </code>
             </article>
           </div>
-        </section>
+          </section>
 
-        <section class="agent-exploration-panel">
+          <section class="agent-exploration-panel">
           <div class="panel-heading">
             <h3>Agent 探索过程</h3>
             <span>{{ explorationNotes.length }} 步本地只读探索</span>
@@ -725,51 +837,155 @@ onUnmounted(() => {
             </li>
           </ol>
           <p v-else class="empty-note">这份历史报告还没有 Agent 探索过程。</p>
-        </section>
+          </section>
+        </div>
 
-        <section class="ai-panel">
+        <section v-show="activeReportTab === 'agent'" class="ai-panel report-tab-panel" role="tabpanel" aria-label="AI Agent 深度评分">
           <div class="panel-heading">
-            <h3>AI 独立审阅</h3>
-            <span v-if="deepAiAssessment">AI {{ deepAiAssessment.score }} / 100，置信度 {{ deepAiAssessment.confidence }}</span>
+            <h3>AI Agent 深度评分</h3>
+            <span v-if="agentDeepScore">{{ agentDeepScore.score }} / 100，置信度 {{ confidenceLabel(agentDeepScore.confidence) }}</span>
             <span v-else>未生成</span>
           </div>
 
           <p class="ai-score-note">
-            AI 独立分由模型读取本地证据包后给出：目录树、LangGraph 探索过程、manifest/CI/测试/文档/安全信号、少量脱敏源码片段，以及核心评分摘要。它按架构 20、工程 20、测试 15、文档 15、安全 15、可维护性 15 的同一套标准独立判断。
+            这一页是 AI Agent 独立深度评分：模型先识别项目类型和评分 Rubric，再通过只读工具按需探索仓库，最后由多个维度评委、Critic 和校准器生成参考分。
           </p>
 
           <p v-if="currentReport.payload.ai_error" class="error-message">{{ currentReport.payload.ai_error }}</p>
 
-          <template v-if="deepAiAssessment">
-            <p class="ai-summary">{{ deepAiAssessment.summary }}</p>
+          <template v-if="agentDeepScore">
+            <section class="agent-score-summary">
+              <div class="agent-score-number">
+                <span>AI Agent 独立分</span>
+                <strong>{{ agentDeepScore.score }}</strong>
+                <p>不参与核心综合分，仅作为代码深度审阅参考。</p>
+              </div>
+              <div class="agent-profile-grid">
+                <div v-for="item in agentProfileItems" :key="item.key">
+                  <span>{{ item.label }}</span>
+                  <strong>{{ item.value }}</strong>
+                </div>
+              </div>
+            </section>
+
+            <p class="ai-summary">{{ agentDeepScore.final_report.summary || deepAiAssessment?.summary }}</p>
+
+            <section class="agent-subsection">
+              <div class="panel-heading">
+                <h4>评分 Rubric</h4>
+                <span>{{ agentDeepScore.rubric.rationale || '按项目类型选择权重' }}</span>
+              </div>
+              <div class="agent-rubric-grid">
+                <div v-for="item in agentRubricItems" :key="item.key" class="agent-rubric-item">
+                  <span>{{ item.label }}</span>
+                  <strong>{{ item.value }} 分</strong>
+                </div>
+              </div>
+            </section>
+
+            <section class="agent-subsection">
+              <div class="panel-heading">
+                <h4>自主探索过程</h4>
+                <span>{{ agentDeepScore.exploration_steps.length }} 步 · {{ agentDeepScore.evidence_pool.length }} 条证据</span>
+              </div>
+              <ol class="exploration-list">
+                <li v-for="step in agentDeepScore.exploration_steps" :key="`agent-${step.step}-${step.action}-${step.target}`" class="exploration-item">
+                  <div class="exploration-step">
+                    <span>{{ step.step }}</span>
+                  </div>
+                  <div class="exploration-body">
+                    <div class="exploration-meta">
+                      <strong>{{ step.action }}</strong>
+                      <code v-if="step.target">{{ step.target }}</code>
+                      <span>{{ agentDimensionLabels[step.dimension] ?? step.dimension }}</span>
+                    </div>
+                    <p>{{ step.thought }}</p>
+                    <p class="exploration-result">{{ step.result_summary }}</p>
+                  </div>
+                </li>
+              </ol>
+            </section>
+
+            <section class="agent-subsection">
+              <div class="panel-heading">
+                <h4>维度评委</h4>
+                <span>多评委打分后经过 Critic 校准</span>
+              </div>
+              <div class="agent-judge-grid">
+                <article v-for="item in agentDimensionItems" :key="item.key" class="agent-judge-card">
+                  <header>
+                    <div>
+                      <h5>{{ item.label }}</h5>
+                      <span>置信度 {{ confidenceLabel(item.dimension.confidence) }}</span>
+                    </div>
+                    <strong>{{ calibratedScore(item.key, item.dimension) }} / {{ item.dimension.max_score }}</strong>
+                  </header>
+                  <p>{{ item.dimension.reasoning }}</p>
+                  <ul v-if="item.dimension.recommendations.length" class="plain-list">
+                    <li v-for="rec in item.dimension.recommendations.slice(0, 2)" :key="rec">{{ rec }}</li>
+                  </ul>
+                </article>
+              </div>
+            </section>
+
+            <section class="agent-subsection critic-panel">
+              <div>
+                <h4>Critic 复核</h4>
+                <p>{{ agentDeepScore.critic_review.verdict }}</p>
+                <p v-if="agentDeepScore.final_report.calibration_rationale">{{ agentDeepScore.final_report.calibration_rationale }}</p>
+              </div>
+              <div>
+                <h5>关注点</h5>
+                <ul class="plain-list">
+                  <li v-for="item in agentDeepScore.critic_review.concerns" :key="item">{{ item }}</li>
+                  <li v-if="!agentDeepScore.critic_review.concerns.length">没有额外降分关注点。</li>
+                </ul>
+              </div>
+              <div>
+                <h5>证据缺口</h5>
+                <ul class="plain-list">
+                  <li v-for="item in agentDeepScore.critic_review.evidence_gaps" :key="item">{{ item }}</li>
+                  <li v-if="!agentDeepScore.critic_review.evidence_gaps.length">未报告明显证据缺口。</li>
+                </ul>
+              </div>
+            </section>
+
+            <section v-if="agentEvidencePreview.length" class="agent-subsection">
+              <div class="panel-heading">
+                <h4>证据样本</h4>
+                <span>展示前 {{ agentEvidencePreview.length }} 条</span>
+              </div>
+              <div class="agent-evidence-list">
+                <article v-for="item in agentEvidencePreview" :key="item.id || `${item.file}-${item.line_start}`" class="agent-evidence-item">
+                  <strong>{{ evidenceLocation(item) }}</strong>
+                  <span>{{ agentDimensionLabels[item.dimension ?? ''] ?? item.dimension }}</span>
+                  <p>{{ item.snippet }}</p>
+                </article>
+              </div>
+            </section>
+
             <div class="ai-columns">
               <div>
                 <h4>优势</h4>
                 <ul class="plain-list">
-                  <li v-for="item in deepAiAssessment.strengths" :key="item">{{ item }}</li>
+                  <li v-for="item in agentDeepScore.final_report.strengths ?? []" :key="item">{{ item }}</li>
                 </ul>
               </div>
               <div>
                 <h4>风险</h4>
                 <ul class="plain-list">
-                  <li v-for="item in deepAiAssessment.risks" :key="item">{{ item }}</li>
+                  <li v-for="item in agentDeepScore.final_report.risks ?? []" :key="item">{{ item }}</li>
                 </ul>
               </div>
               <div>
                 <h4>建议</h4>
                 <ul class="plain-list">
-                  <li v-for="item in deepAiAssessment.recommendations" :key="item">{{ item }}</li>
+                  <li v-for="item in agentDeepScore.final_report.recommendations ?? []" :key="item">{{ item }}</li>
                 </ul>
               </div>
             </div>
-            <div class="ai-review-list">
-              <div v-for="(review, key) in deepAiAssessment.dimension_reviews" :key="key">
-                <strong>{{ dimensionLabels[key] ?? key }}</strong>
-                <p>{{ review }}</p>
-              </div>
-            </div>
           </template>
-          <p v-else class="empty-note">填写 AI 配置后，分析时会让 AI 基于本地证据包做独立中文审阅。</p>
+          <p v-else class="empty-note">填写并通过 AI 配置测试后重新分析，系统会启动 AI Agent 自主探索；未填写 AI 配置时该标签页会保持为空。</p>
         </section>
       </template>
     </section>
@@ -847,7 +1063,7 @@ onUnmounted(() => {
               </div>
             </li>
           </ol>
-          <p v-else class="agent-muted">任务运行后，这里会显示 GitHub REST、clone、本地探索和 LangGraph 工具调用等内部动作。</p>
+          <p v-else class="agent-muted">任务运行后，这里会显示 GitHub REST、clone、本地探索和基础规则评分工具调用等内部动作。</p>
         </section>
 
         <section class="agent-section agent-evidence-link">
@@ -857,7 +1073,7 @@ onUnmounted(() => {
       </div>
       <div v-else class="agent-empty">
         <Activity :size="28" />
-        <p>开始体检后，这里会显示阶段时间线、LangGraph 内部节点、只读工具调用和当前正在查看的目标文件。</p>
+        <p>开始体检后，这里会显示阶段时间线、基础规则评分内部节点、只读工具调用和当前正在查看的目标文件。</p>
       </div>
     </aside>
 
@@ -866,7 +1082,7 @@ onUnmounted(() => {
         <div class="guide-modal-header">
           <div>
             <h2>评分说明</h2>
-            <p>核心分来自 LangGraph 本地只读探索证据；AI 分是独立审阅，不再使用“规则分 + 修正值”。</p>
+            <p>当前正式分数来自基础规则评分；AI Agent 深度评分由模型自主探索本地代码生成，作为独立参考，不参与核心综合分。</p>
           </div>
           <button class="icon-button" type="button" title="关闭评分说明" @click="showScoringGuide = false">
             <X :size="18" />
@@ -875,8 +1091,8 @@ onUnmounted(() => {
 
         <div class="guide-content">
           <section>
-            <h3>核心 100 分</h3>
-            <p>系统 clone 公开仓库后，由 LangGraph 先规划探索，再调用 list_dir/read_file/grep/find_files 只读查看配置、README、测试、CI、源码层次和安全信号；索引摘要只做兜底，不安装依赖，不运行仓库代码。</p>
+            <h3>基础规则评分 100 分</h3>
+            <p>系统 clone 公开仓库后，先按固定探索计划调用 list_dir/read_file/grep/find_files 只读查看配置、README、测试、CI、源码层次和安全信号，再按规则生成六维评分；索引摘要只做兜底，不安装依赖，不运行仓库代码。</p>
           </section>
 
           <section>
@@ -897,8 +1113,8 @@ onUnmounted(() => {
           </section>
 
           <section>
-            <h3>AI 独立分</h3>
-            <p>AI 独立分不是“规则分 + 修正值”。系统会把本地只读证据包压缩给 AI，包括目录树、Agent 探索过程、关键配置、测试/CI/文档/安全信号、少量脱敏源码片段和核心评分摘要。AI 再按同样的六个维度独立给出 0-100 分、置信度和中文理由。这个分数只作为对照参考，不改变核心综合分。</p>
+            <h3>AI Agent 深度评分</h3>
+            <p>模型会先识别项目类型和技术栈，再选择评分 Rubric，并在 evidence_explorer_loop 中按需调用 read_file、grep、list_dir、find_files 四个只读工具。随后由多个维度评委、Critic 复核和校准器生成独立分、证据链、风险和建议。</p>
           </section>
 
           <section>

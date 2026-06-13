@@ -115,6 +115,62 @@ class DeepAiAssessment(BaseModel):
     recommendations: list[str] = Field(default_factory=list)
 
 
+class AgentToolCall(BaseModel):
+    thought: str = ""
+    action: Literal["read_file", "grep", "list_dir", "find_files", "finish"]
+    target: str = ""
+    dimension: str = "overall"
+    reason: str = ""
+    include_globs: list[str] | None = None
+    start_line: int = Field(default=1, ge=1)
+    max_lines: int = Field(default=160, ge=1, le=200)
+    max_matches: int = Field(default=30, ge=1, le=50)
+
+
+class AgentObservation(BaseModel):
+    step: int = Field(ge=1)
+    thought: str = ""
+    action: str
+    target: str = ""
+    dimension: str = "overall"
+    result_summary: str = ""
+    evidence: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class AgentDimensionScore(BaseModel):
+    dimension: str
+    score: int = Field(ge=0)
+    max_score: int = Field(gt=0)
+    confidence: Literal["low", "medium", "high"] = "medium"
+    reasoning: str
+    evidence_refs: list[str] = Field(default_factory=list)
+    strengths: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    recommendations: list[str] = Field(default_factory=list)
+
+
+class AgentCriticReview(BaseModel):
+    verdict: str
+    concerns: list[str] = Field(default_factory=list)
+    evidence_gaps: list[str] = Field(default_factory=list)
+    score_adjustments: dict[str, int] = Field(default_factory=dict)
+
+
+class AgentDeepScore(BaseModel):
+    score: int = Field(ge=0, le=100)
+    confidence: Literal["low", "medium", "high"] = "medium"
+    project_profile: dict[str, Any] = Field(default_factory=dict)
+    rubric: dict[str, Any] = Field(default_factory=dict)
+    exploration_steps: list[AgentObservation] = Field(default_factory=list)
+    evidence_pool: list[dict[str, Any]] = Field(default_factory=list)
+    curated_evidence: dict[str, Any] = Field(default_factory=dict)
+    dimensions: dict[str, AgentDimensionScore] = Field(default_factory=dict)
+    critic_review: AgentCriticReview
+    calibrated_dimensions: dict[str, int] = Field(default_factory=dict)
+    final_report: dict[str, Any] = Field(default_factory=dict)
+    trace: list[str] = Field(default_factory=list)
+
+
 class DeepAnalysisReport(BaseModel):
     core_score: CoreScoreResult
     suitability: SuitabilityScores

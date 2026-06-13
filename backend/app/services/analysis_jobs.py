@@ -12,8 +12,8 @@ JOB_STEP_DEFINITIONS = [
     ("github_metadata", "读取 GitHub 元数据"),
     ("clone_repo", "只读 clone 仓库"),
     ("index_repo", "扫描目录与代码证据"),
-    ("langgraph_score", "LangGraph 六维评分"),
-    ("ai_review", "AI 独立审阅"),
+    ("langgraph_score", "基础规则评分"),
+    ("ai_review", "AI Agent 深度评分"),
     ("save_report", "保存报告记录"),
 ]
 
