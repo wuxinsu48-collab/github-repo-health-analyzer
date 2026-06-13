@@ -47,8 +47,17 @@ def insert_report(payload: dict[str, Any]) -> dict[str, Any]:
     init_db()
     created_at = datetime.now(timezone.utc).isoformat()
     repo = payload["evidence"]["repo"]
-    ai = payload.get("ai_assessment")
-    ai_score = ai.get("ai_score") if isinstance(ai, dict) else None
+    ai = payload.get("deep_ai_assessment") or payload.get("ai_assessment")
+    if isinstance(ai, dict) and "score" in ai:
+        ai_score = ai.get("score")
+    elif isinstance(ai, dict):
+        ai_score = ai.get("ai_score")
+    else:
+        ai_score = None
+    if "core_score" in payload:
+        rule_score_value = payload["core_score"]["score"]
+    else:
+        rule_score_value = payload["rule_score"]["rule_score"]
     record_payload = {**payload, "created_at": created_at}
 
     with _connect() as conn:
@@ -62,7 +71,7 @@ def insert_report(payload: dict[str, Any]) -> dict[str, Any]:
                 repo["html_url"],
                 created_at,
                 payload["final_score"],
-                payload["rule_score"]["rule_score"],
+                rule_score_value,
                 ai_score,
                 json.dumps(record_payload, ensure_ascii=False),
             ),
@@ -109,4 +118,3 @@ def list_reports(limit: int = 20) -> list[dict[str, Any]]:
             (limit,),
         ).fetchall()
     return [_row_to_report(row) for row in rows]
-

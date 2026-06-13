@@ -1,4 +1,4 @@
-import type { AnalyzeRequest, ConnectionTestResponse, RecentReport, ReportResponse } from './types'
+import type { AnalysisJobResponse, AnalyzeRequest, ConnectionTestResponse, RecentReport, ReportResponse } from './types'
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://127.0.0.1:8000'
 
@@ -46,6 +46,17 @@ export function analyzeRepo(payload: AnalyzeRequest): Promise<ReportResponse> {
   })
 }
 
+export function startAnalyzeJob(payload: AnalyzeRequest): Promise<AnalysisJobResponse> {
+  return request('/api/analyze/jobs', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function getAnalyzeJob(jobId: string): Promise<AnalysisJobResponse> {
+  return request(`/api/analyze/jobs/${jobId}`)
+}
+
 export function listReports(): Promise<RecentReport[]> {
   return request('/api/reports')
 }
@@ -53,4 +64,3 @@ export function listReports(): Promise<RecentReport[]> {
 export function getReport(id: number): Promise<ReportResponse> {
   return request(`/api/reports/${id}`)
 }
-

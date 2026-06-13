@@ -8,6 +8,7 @@ venv/
 
 # SQLite runtime data
 backend/data/
+backend/workspaces/
 *.sqlite3
 logs/
 

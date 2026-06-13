@@ -22,9 +22,17 @@ def parse_github_repo_url(url: str) -> tuple[str, str]:
     if not value:
         raise ValueError("请输入 GitHub 仓库 URL")
 
+    markdown_match = re.match(r"^\[[^\]]+\]\(([^)]+)\)$", value)
+    if markdown_match:
+        value = markdown_match.group(1).strip()
+
     ssh_match = re.match(r"^git@github\.com:([^/\s]+)/([^/\s]+?)(?:\.git)?$", value)
     if ssh_match:
         return ssh_match.group(1), ssh_match.group(2)
+
+    shorthand_match = re.match(r"^([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$", value)
+    if shorthand_match:
+        return shorthand_match.group(1), shorthand_match.group(2)
 
     if value.startswith("github.com/"):
         value = "https://" + value
@@ -247,4 +255,3 @@ def summarize_tree(tree: list[str]) -> dict[str, Any]:
         "has_docker": any(path.endswith("dockerfile") or path.endswith("docker-compose.yml") for path in lower_paths),
         "manifests": [path for path in tree if path.lower().endswith(manifest_names)],
     }
-

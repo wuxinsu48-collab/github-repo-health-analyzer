@@ -16,6 +16,24 @@ export interface AnalyzeRequest {
   ai?: AiConfig
 }
 
+export type AnalysisJobStepStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped'
+
+export interface AnalysisJobStep {
+  id: string
+  label: string
+  status: AnalysisJobStepStatus
+  detail: string
+}
+
+export interface AnalysisJobResponse {
+  job_id: string
+  status: 'running' | 'completed' | 'failed'
+  steps: AnalysisJobStep[]
+  report_id: number | null
+  report: ReportResponse | null
+  error: string | null
+}
+
 export interface RuleScore {
   rule_score: number
   dimension_scores: Record<string, number>
@@ -24,6 +42,7 @@ export interface RuleScore {
 
 export interface AiAssessment {
   ai_score: number
+  score_adjustment?: number
   confidence: 'low' | 'medium' | 'high'
   summary: string
   strengths: string[]
@@ -31,6 +50,75 @@ export interface AiAssessment {
   recommendations: string[]
   dimension_comments: Record<string, string>
   score_rationale?: string
+}
+
+export interface EvidenceItem {
+  label: string
+  path?: string | null
+  excerpt: string
+}
+
+export interface ScoreDimension {
+  score: number
+  max_score: number
+  reason: string
+  evidence: EvidenceItem[]
+}
+
+export interface CoreScore {
+  score: number
+  dimensions: Record<string, ScoreDimension>
+  summary: string
+  risk_flags: string[]
+}
+
+export interface SuitabilityScores {
+  learning: number
+  secondary_development: number
+  production: number
+  notes: Record<string, string>
+}
+
+export interface CommunityReference {
+  stars: number
+  forks: number
+  open_issues: number
+  watchers: number
+  pushed_at?: string | null
+  archived: boolean
+  disabled: boolean
+  default_branch?: string | null
+  license_name?: string | null
+  topics: string[]
+  recent_commits: number
+  releases: number
+}
+
+export interface DeepAiAssessment {
+  score: number
+  confidence: 'low' | 'medium' | 'high'
+  summary: string
+  dimension_reviews: Record<string, string>
+  strengths: string[]
+  risks: string[]
+  recommendations: string[]
+}
+
+export interface LocalIndex {
+  tree: string[]
+  file_count: number
+  directory_count: number
+  total_bytes: number
+  extension_counts: Record<string, number>
+  source_files: string[]
+  test_files: string[]
+  documentation_files: string[]
+  manifest_files: string[]
+  ci_files: string[]
+  config_files: string[]
+  security_files: string[]
+  snippets: EvidenceItem[]
+  security_findings: EvidenceItem[]
 }
 
 export interface ReportPayload {
@@ -69,6 +157,17 @@ export interface ReportPayload {
       manifests: string[]
     }
   }
+  local_index: LocalIndex
+  core_score: CoreScore
+  suitability: SuitabilityScores
+  community_reference: CommunityReference
+  analysis_trace: string[]
+  summary: string
+  strengths: string[]
+  risks: string[]
+  recommendations: string[]
+  github_warning?: string | null
+  deep_ai_assessment: DeepAiAssessment | null
   rule_score: RuleScore
   ai_assessment: AiAssessment | null
   ai_error: string | null
@@ -95,4 +194,3 @@ export interface RecentReport {
   rule_score: number
   ai_score: number | null
 }
-

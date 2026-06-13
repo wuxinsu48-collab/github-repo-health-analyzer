@@ -11,6 +11,8 @@ from app.services.github import parse_github_repo_url
         ("https://github.com/vuejs/core/issues/1", ("vuejs", "core")),
         ("git@github.com:psf/requests.git", ("psf", "requests")),
         ("github.com/fastapi/fastapi", ("fastapi", "fastapi")),
+        ("zhanghuanhao/LibrarySystem", ("zhanghuanhao", "LibrarySystem")),
+        ("[zhanghuanhao/LibrarySystem](https://github.com/zhanghuanhao/LibrarySystem)", ("zhanghuanhao", "LibrarySystem")),
     ],
 )
 def test_parse_github_repo_url_accepts_common_formats(url, expected):
@@ -29,4 +31,3 @@ def test_parse_github_repo_url_accepts_common_formats(url, expected):
 def test_parse_github_repo_url_rejects_invalid_values(url):
     with pytest.raises(ValueError):
         parse_github_repo_url(url)
-
