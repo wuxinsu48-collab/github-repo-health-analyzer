@@ -18,11 +18,22 @@ export interface AnalyzeRequest {
 
 export type AnalysisJobStepStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped'
 
+export interface AnalysisJobEvent {
+  id: string
+  label: string
+  status: AnalysisJobStepStatus
+  detail: string
+  kind: 'node' | 'tool'
+  target?: string | null
+  dimension?: string | null
+}
+
 export interface AnalysisJobStep {
   id: string
   label: string
   status: AnalysisJobStepStatus
   detail: string
+  events: AnalysisJobEvent[]
 }
 
 export interface AnalysisJobResponse {
@@ -56,6 +67,9 @@ export interface EvidenceItem {
   label: string
   path?: string | null
   excerpt: string
+  line_start?: number | null
+  line_end?: number | null
+  reason?: string | null
 }
 
 export interface ScoreDimension {
@@ -102,6 +116,30 @@ export interface DeepAiAssessment {
   strengths: string[]
   risks: string[]
   recommendations: string[]
+}
+
+export interface ExplorationEvidence {
+  step: number
+  action: string
+  target: string
+  dimension: string
+  file?: string | null
+  line_start?: number | null
+  line_end?: number | null
+  total_lines?: number | null
+  snippet: string
+  match?: string
+  reason: string
+}
+
+export interface ExplorationNote {
+  step: number
+  thought: string
+  action: 'read_file' | 'grep' | 'list_dir' | 'find_files' | string
+  target: string
+  result_summary: string
+  dimension: string
+  evidence: ExplorationEvidence[]
 }
 
 export interface LocalIndex {
@@ -159,8 +197,12 @@ export interface ReportPayload {
   }
   local_index: LocalIndex
   core_score: CoreScore
+  dimensions: Record<string, ScoreDimension>
   suitability: SuitabilityScores
   community_reference: CommunityReference
+  exploration_notes: ExplorationNote[]
+  evidence_pool: ExplorationEvidence[]
+  agent_exploration: ExplorationNote[]
   analysis_trace: string[]
   summary: string
   strengths: string[]
@@ -171,6 +213,12 @@ export interface ReportPayload {
   rule_score: RuleScore
   ai_assessment: AiAssessment | null
   ai_error: string | null
+  final_report: {
+    core_score: CoreScore
+    exploration_notes: ExplorationNote[]
+    evidence_pool: ExplorationEvidence[]
+    [key: string]: unknown
+  }
   final_score: number
 }
 

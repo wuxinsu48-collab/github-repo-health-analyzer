@@ -4,7 +4,7 @@ import copy
 import uuid
 from typing import Any
 
-from app.models import AnalysisJobResponse, AnalysisJobStep
+from app.models import AnalysisJobEvent, AnalysisJobResponse, AnalysisJobStep
 
 
 JOB_STEP_DEFINITIONS = [
@@ -48,6 +48,20 @@ def update_step(job_id: str, step_id: str, status: str, detail: str = "") -> Non
 
 def skip_step(job_id: str, step_id: str, detail: str = "") -> None:
     update_step(job_id, step_id, "skipped", detail)
+
+
+def add_step_event(job_id: str, step_id: str, event: dict[str, Any] | AnalysisJobEvent) -> None:
+    job = _jobs[job_id]
+    event_model = event if isinstance(event, AnalysisJobEvent) else AnalysisJobEvent.model_validate(event)
+    for step in job.steps:
+        if step.id != step_id:
+            continue
+        for index, existing in enumerate(step.events):
+            if existing.id == event_model.id:
+                step.events[index] = event_model
+                return
+        step.events.append(event_model)
+        return
 
 
 def complete_job(job_id: str, report: dict[str, Any]) -> None:

@@ -1,6 +1,11 @@
+import asyncio
+import time
+
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.db import insert_report, list_reports
+from app.models import AnalyzeRequest
 from app.services.github import GitHubApiError
 
 
@@ -69,9 +74,14 @@ def test_analyze_endpoint_returns_deep_core_score(monkeypatch, tmp_path):
     data = response.json()
     payload = data["payload"]
     assert "core_score" in payload
+    assert "dimensions" in payload
+    assert "exploration_notes" in payload
+    assert "evidence_pool" in payload
+    assert "final_report" in payload
     assert "suitability" in payload
     assert "community_reference" in payload
     assert "analysis_trace" in payload
+    assert payload["final_report"]["core_score"]["score"] == payload["core_score"]["score"]
     assert data["final_score"] == payload["core_score"]["score"]
 
 
@@ -85,7 +95,7 @@ def test_analyze_endpoint_retries_public_repo_without_invalid_optional_token(mon
     calls: list[str | None] = []
 
     class FakeGitHubClient:
-        def __init__(self, token=None):
+        def __init__(self, token=None, progress=None):
             self.token = token
 
         async def fetch_repo_evidence(self, owner, name):
@@ -139,6 +149,77 @@ def test_analyze_endpoint_retries_public_repo_without_invalid_optional_token(mon
     assert payload["github_warning"] == "GitHub Token 无效，已改用公开访问继续分析。"
 
 
+async def test_run_analysis_pipeline_forwards_github_progress_events(monkeypatch, tmp_path):
+    from app.main import run_analysis_pipeline
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "README.md").write_text("# Demo\n", encoding="utf-8")
+
+    class FakeGitHubClient:
+        def __init__(self, token=None, progress=None):
+            self.progress = progress
+
+        async def fetch_repo_evidence(self, owner, name):
+            if self.progress:
+                self.progress(
+                    {
+                        "id": "github_repo",
+                        "label": "repo",
+                        "status": "completed",
+                        "detail": "仓库基础信息读取完成",
+                        "kind": "tool",
+                        "target": f"{owner}/{name}",
+                    }
+                )
+            return {
+                "repo": {
+                    "full_name": f"{owner}/{name}",
+                    "html_url": f"https://github.com/{owner}/{name}",
+                    "description": "demo",
+                    "stars": 5,
+                    "forks": 2,
+                    "watchers": 5,
+                    "subscribers": 1,
+                    "open_issues": 0,
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "updated_at": "2026-06-01T00:00:00Z",
+                    "pushed_at": "2026-06-01T00:00:00Z",
+                    "archived": False,
+                    "disabled": False,
+                    "fork": False,
+                    "license": None,
+                    "default_branch": "main",
+                    "size": 10,
+                    "topics": [],
+                    "homepage": "",
+                },
+                "languages": {"Python": 100},
+                "community": {"readme": True, "license": False, "security": False},
+                "commits": [],
+                "releases": [],
+                "tree": [],
+                "readme_excerpt": "",
+                "config_summary": {},
+            }
+
+    progress_events = []
+
+    def progress(step_id, status, detail="", metadata=None):
+        progress_events.append((step_id, status, detail, metadata))
+
+    monkeypatch.setattr("app.main.GitHubClient", FakeGitHubClient)
+    monkeypatch.setattr("app.main.clone_repository", lambda owner, name, repo_url: repo)
+    monkeypatch.setattr("app.main.cleanup_repository", lambda path: None)
+
+    await run_analysis_pipeline(AnalyzeRequest(repo_url="https://github.com/acme/demo"), progress)
+
+    assert any(
+        step_id == "github_metadata" and metadata and metadata["event"]["id"] == "github_repo"
+        for step_id, _, _, metadata in progress_events
+    )
+
+
 def test_analyze_job_endpoint_returns_agent_steps(monkeypatch):
     created = []
 
@@ -170,3 +251,142 @@ def test_analyze_job_endpoint_returns_agent_steps(monkeypatch):
     status_response = client.get(f"/api/analyze/jobs/{data['job_id']}")
     assert status_response.status_code == 200
     assert status_response.json()["job_id"] == data["job_id"]
+
+
+def test_analysis_job_step_can_include_langgraph_internal_events():
+    from app.services.analysis_jobs import add_step_event, clear_jobs_for_tests, create_analysis_job, get_analysis_job
+
+    clear_jobs_for_tests()
+    job = create_analysis_job()
+
+    add_step_event(
+        job.job_id,
+        "langgraph_score",
+        {
+            "id": "tool_1_read_file",
+            "label": "read_file",
+            "status": "running",
+            "detail": "读取 package.json",
+            "kind": "tool",
+            "target": "package.json",
+        },
+    )
+    add_step_event(
+        job.job_id,
+        "langgraph_score",
+        {
+            "id": "tool_1_read_file",
+            "label": "read_file",
+            "status": "completed",
+            "detail": "发现 build/test 脚本",
+            "kind": "tool",
+            "target": "package.json",
+        },
+    )
+
+    langgraph_step = next(step for step in get_analysis_job(job.job_id).steps if step.id == "langgraph_score")
+
+    assert len(langgraph_step.events) == 1
+    assert langgraph_step.events[0].status == "completed"
+    assert langgraph_step.events[0].kind == "tool"
+    assert langgraph_step.events[0].target == "package.json"
+
+
+async def test_analysis_job_status_remains_pollable_during_blocking_clone(monkeypatch, tmp_path):
+    from app.main import run_analysis_job
+    from app.services.analysis_jobs import clear_jobs_for_tests, create_analysis_job, get_analysis_job
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "README.md").write_text("# Demo\n", encoding="utf-8")
+
+    class FakeGitHubClient:
+        def __init__(self, token=None, progress=None):
+            self.progress = progress
+
+        async def fetch_repo_evidence(self, owner, name):
+            return {
+                "repo": {
+                    "full_name": f"{owner}/{name}",
+                    "html_url": f"https://github.com/{owner}/{name}",
+                    "description": "demo",
+                    "stars": 5,
+                    "forks": 2,
+                    "watchers": 5,
+                    "subscribers": 1,
+                    "open_issues": 0,
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "updated_at": "2026-06-01T00:00:00Z",
+                    "pushed_at": "2026-06-01T00:00:00Z",
+                    "archived": False,
+                    "disabled": False,
+                    "fork": False,
+                    "license": None,
+                    "default_branch": "main",
+                    "size": 10,
+                    "topics": [],
+                    "homepage": "",
+                },
+                "languages": {"Python": 100},
+                "community": {"readme": True, "license": False, "security": False},
+                "commits": [],
+                "releases": [],
+                "tree": [],
+                "readme_excerpt": "",
+                "config_summary": {},
+            }
+
+    def slow_clone_repository(owner, name, repo_url):
+        time.sleep(0.4)
+        return repo
+
+    clear_jobs_for_tests()
+    job = create_analysis_job()
+    monkeypatch.setattr("app.main.GitHubClient", FakeGitHubClient)
+    monkeypatch.setattr("app.main.clone_repository", slow_clone_repository)
+    monkeypatch.setattr("app.main.cleanup_repository", lambda path: None)
+
+    start = time.perf_counter()
+    task = asyncio.create_task(run_analysis_job(job.job_id, AnalyzeRequest(repo_url="https://github.com/acme/demo")))
+    await asyncio.sleep(0.05)
+    elapsed = time.perf_counter() - start
+
+    clone_step = next(step for step in get_analysis_job(job.job_id).steps if step.id == "clone_repo")
+
+    await task
+
+    assert elapsed < 0.2
+    assert clone_step.status == "running"
+
+
+def test_delete_report_endpoint_removes_recent_report(monkeypatch, tmp_path):
+    monkeypatch.setenv("GITHUB_ANALYSIS_DB", str(tmp_path / "reports.sqlite3"))
+    report = insert_report(
+        {
+            "evidence": {
+                "repo": {
+                    "full_name": "acme/demo",
+                    "html_url": "https://github.com/acme/demo",
+                }
+            },
+            "core_score": {"score": 72},
+            "rule_score": {"rule_score": 72, "dimension_scores": {}, "risk_flags": []},
+            "final_score": 72,
+        }
+    )
+
+    client = TestClient(app)
+    response = client.delete(f"/api/reports/{report['id']}")
+
+    assert response.status_code == 204
+    assert list_reports() == []
+    assert client.get(f"/api/reports/{report['id']}").status_code == 404
+
+
+def test_delete_report_endpoint_returns_404_for_missing_report(monkeypatch, tmp_path):
+    monkeypatch.setenv("GITHUB_ANALYSIS_DB", str(tmp_path / "reports.sqlite3"))
+    client = TestClient(app)
+
+    response = client.delete("/api/reports/999")
+
+    assert response.status_code == 404

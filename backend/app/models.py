@@ -26,6 +26,17 @@ class AnalysisJobStep(BaseModel):
     label: str
     status: Literal["pending", "running", "completed", "failed", "skipped"] = "pending"
     detail: str = ""
+    events: list["AnalysisJobEvent"] = Field(default_factory=list)
+
+
+class AnalysisJobEvent(BaseModel):
+    id: str
+    label: str
+    status: Literal["pending", "running", "completed", "failed", "skipped"] = "pending"
+    detail: str = ""
+    kind: Literal["node", "tool"] = "node"
+    target: str | None = None
+    dimension: str | None = None
 
 
 class AnalysisJobResponse(BaseModel):
@@ -53,6 +64,9 @@ class EvidenceItem(BaseModel):
     label: str
     path: str | None = None
     excerpt: str = ""
+    line_start: int | None = None
+    line_end: int | None = None
+    reason: str | None = None
 
 
 class ScoreDimension(BaseModel):
@@ -106,6 +120,9 @@ class DeepAnalysisReport(BaseModel):
     suitability: SuitabilityScores
     community_reference: CommunityReference
     local_index: dict[str, Any]
+    exploration_notes: list[dict[str, Any]] = Field(default_factory=list)
+    evidence_pool: list[dict[str, Any]] = Field(default_factory=list)
+    agent_exploration: list[dict[str, Any]] = Field(default_factory=list)
     analysis_trace: list[str] = Field(default_factory=list)
     summary: str
     strengths: list[str] = Field(default_factory=list)

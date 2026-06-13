@@ -66,3 +66,16 @@ def cleanup_repository(path: Path) -> None:
                 raise exc
 
         shutil.rmtree(target, onexc=reset_permissions_and_retry)
+
+
+def cleanup_stale_workspaces() -> int:
+    if not WORKSPACE_ROOT.exists():
+        return 0
+
+    removed = 0
+    for child in WORKSPACE_ROOT.iterdir():
+        if not child.is_dir():
+            continue
+        cleanup_repository(child)
+        removed += 1
+    return removed

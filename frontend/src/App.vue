@@ -17,13 +17,25 @@ import {
   RefreshCw,
   ShieldCheck,
   Star,
+  Trash2,
   X,
 } from 'lucide-vue-next'
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { getAnalyzeJob, getReport, listReports, startAnalyzeJob, testAi, testGitHub } from './api'
-import type { AnalysisJobResponse, ConnectionTestResponse, RecentReport, ReportResponse, ScoreDimension } from './types'
+import { deleteReport, getAnalyzeJob, getReport, listReports, startAnalyzeJob, testAi, testGitHub } from './api'
+import type {
+  AnalysisJobResponse,
+  AnalysisJobEvent,
+  AnalysisJobStep,
+  ConnectionTestResponse,
+  ExplorationNote,
+  RecentReport,
+  ReportResponse,
+  ScoreDimension,
+} from './types'
 
 use([BarChart, GaugeChart, PieChart, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer])
+
+type DrawerEvent = AnalysisJobEvent & { stepLabel: string }
 
 const repoUrl = ref('')
 const githubToken = ref('')
@@ -41,6 +53,7 @@ const aiStatus = ref<ConnectionTestResponse | null>(null)
 const errorMessage = ref('')
 const showScoringGuide = ref(false)
 const currentJob = ref<AnalysisJobResponse | null>(null)
+const deletingReportId = ref<number | null>(null)
 let jobPollTimer: number | null = null
 
 const scoreChartEl = ref<HTMLDivElement | null>(null)
@@ -54,6 +67,7 @@ const repo = computed(() => currentReport.value?.payload.evidence.repo)
 const coreScore = computed(() => currentReport.value?.payload.core_score)
 const deepAiAssessment = computed(() => currentReport.value?.payload.deep_ai_assessment)
 const localIndex = computed(() => currentReport.value?.payload.local_index)
+const explorationNotes = computed<ExplorationNote[]>(() => currentReport.value?.payload.exploration_notes ?? [])
 const suitability = computed(() => currentReport.value?.payload.suitability)
 
 const dimensionOrder = ['architecture', 'engineering', 'testing', 'documentation', 'security', 'maintainability']
@@ -88,6 +102,45 @@ const scoreTone = computed(() => {
   if (score >= 60) return 'watch'
   return 'risk'
 })
+
+const jobSteps = computed<AnalysisJobStep[]>(() => currentJob.value?.steps ?? [])
+const completedStepCount = computed(() => jobSteps.value.filter((step) => step.status === 'completed' || step.status === 'skipped').length)
+const drawerEvents = computed<DrawerEvent[]>(() =>
+  jobSteps.value.flatMap((step) =>
+    (step.events ?? []).map((event) => ({
+      ...event,
+      stepLabel: step.label,
+    })),
+  ),
+)
+const toolEvents = computed(() => drawerEvents.value.filter((event) => event.kind === 'tool'))
+const activeAgentEvent = computed(() => {
+  const runningEvent = [...drawerEvents.value].reverse().find((event) => event.status === 'running')
+  if (runningEvent) return runningEvent
+  return [...drawerEvents.value].reverse()[0] ?? null
+})
+const activeStep = computed(() => {
+  const runningStep = jobSteps.value.find((step) => step.status === 'running')
+  if (runningStep) return runningStep
+  return [...jobSteps.value].reverse().find((step) => step.status === 'completed' || step.status === 'failed' || step.status === 'skipped') ?? null
+})
+const drawerEvidenceCount = computed(() => currentReport.value?.payload.evidence_pool?.length ?? 0)
+const drawerExplorationCount = computed(() => currentReport.value?.payload.exploration_notes?.length ?? drawerEvents.value.length)
+
+function statusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    pending: '等待',
+    running: '运行中',
+    completed: '完成',
+    failed: '失败',
+    skipped: '跳过',
+  }
+  return labels[status] ?? status
+}
+
+function eventKindLabel(event: AnalysisJobEvent): string {
+  return event.kind === 'tool' ? '工具' : '节点'
+}
 
 function formatNumber(value: number | undefined): string {
   return new Intl.NumberFormat('zh-CN').format(value ?? 0)
@@ -349,6 +402,25 @@ async function openReport(id: number) {
   currentReport.value = await getReport(id)
 }
 
+async function onDeleteReport(report: RecentReport) {
+  const ok = window.confirm(`删除报告 ${report.repo_full_name}？`)
+  if (!ok) return
+
+  deletingReportId.value = report.id
+  errorMessage.value = ''
+  try {
+    await deleteReport(report.id)
+    if (currentReport.value?.id === report.id) {
+      currentReport.value = null
+    }
+    await refreshReports()
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '删除报告失败'
+  } finally {
+    deletingReportId.value = null
+  }
+}
+
 function resizeCharts() {
   scoreChart?.resize()
   languageChart?.resize()
@@ -459,17 +531,31 @@ onUnmounted(() => {
             <RefreshCw :size="15" />
           </button>
         </div>
-        <button
+        <div
           v-for="report in reports"
           :key="report.id"
-          class="history-item"
-          :class="{ active: currentReport?.id === report.id }"
-          type="button"
-          @click="openReport(report.id)"
+          class="history-row"
         >
-          <span>{{ report.repo_full_name }}</span>
-          <strong>{{ report.final_score }}</strong>
-        </button>
+          <button
+            class="history-item"
+            :class="{ active: currentReport?.id === report.id }"
+            type="button"
+            @click="openReport(report.id)"
+          >
+            <span>{{ report.repo_full_name }}</span>
+            <strong>{{ report.final_score }}</strong>
+          </button>
+          <button
+            class="icon-button delete-history-button"
+            type="button"
+            title="删除报告"
+            :disabled="deletingReportId === report.id"
+            @click="onDeleteReport(report)"
+          >
+            <Loader2 v-if="deletingReportId === report.id" class="spin" :size="15" />
+            <Trash2 v-else :size="15" />
+          </button>
+        </div>
         <p v-if="!reports.length" class="empty-note">暂无历史报告</p>
       </section>
     </aside>
@@ -478,7 +564,7 @@ onUnmounted(() => {
       <div v-if="!currentReport" class="empty-state">
         <Github :size="42" />
         <h2>输入公开仓库 URL 后开始体检</h2>
-        <p>后端会 clone 仓库到本地工作区，只读扫描目录、配置、文档、测试和源码片段，再生成核心 100 分报告。</p>
+        <p>后端会 clone 仓库到本地工作区，由 LangGraph 编排只读工具按需探索配置、文档、测试、源码和安全线索，再生成核心 100 分报告。</p>
       </div>
 
       <template v-else>
@@ -618,6 +704,29 @@ onUnmounted(() => {
           </div>
         </section>
 
+        <section class="agent-exploration-panel">
+          <div class="panel-heading">
+            <h3>Agent 探索过程</h3>
+            <span>{{ explorationNotes.length }} 步本地只读探索</span>
+          </div>
+          <ol v-if="explorationNotes.length" class="exploration-list">
+            <li v-for="note in explorationNotes" :key="`${note.step}-${note.action}-${note.target}`" class="exploration-item">
+              <div class="exploration-step">
+                <span>{{ note.step }}</span>
+              </div>
+              <div class="exploration-body">
+                <div class="exploration-meta">
+                  <strong>{{ note.action }}</strong>
+                  <code>{{ note.target }}</code>
+                </div>
+                <p>{{ note.thought }}</p>
+                <p class="exploration-result">{{ note.result_summary }}</p>
+              </div>
+            </li>
+          </ol>
+          <p v-else class="empty-note">这份历史报告还没有 Agent 探索过程。</p>
+        </section>
+
         <section class="ai-panel">
           <div class="panel-heading">
             <h3>AI 独立审阅</h3>
@@ -626,7 +735,7 @@ onUnmounted(() => {
           </div>
 
           <p class="ai-score-note">
-            AI 独立分由模型读取本地证据包后给出：目录树、manifest/CI/测试/文档/安全信号、少量脱敏源码片段，以及确定性评分摘要。它按架构 20、工程 20、测试 15、文档 15、安全 15、可维护性 15 的同一套标准独立判断。
+            AI 独立分由模型读取本地证据包后给出：目录树、LangGraph 探索过程、manifest/CI/测试/文档/安全信号、少量脱敏源码片段，以及核心评分摘要。它按架构 20、工程 20、测试 15、文档 15、安全 15、可维护性 15 的同一套标准独立判断。
           </p>
 
           <p v-if="currentReport.payload.ai_error" class="error-message">{{ currentReport.payload.ai_error }}</p>
@@ -666,27 +775,89 @@ onUnmounted(() => {
     </section>
 
     <aside class="agent-drawer">
-      <div class="agent-drawer-header">
+      <div class="agent-console-head">
         <div>
-          <h2>Agent 步骤</h2>
-          <p v-if="currentJob">任务 {{ currentJob.job_id.slice(0, 8) }} · {{ currentJob.status }}</p>
+          <h2>Agent 执行观察台</h2>
+          <p v-if="currentJob">任务 {{ currentJob.job_id.slice(0, 8) }} · {{ statusLabel(currentJob.status) }}</p>
           <p v-else>等待开始体检</p>
         </div>
-        <Loader2 v-if="isAnalyzing" class="spin" :size="20" />
+        <span class="agent-status-pill" :class="currentJob?.status ?? 'idle'">
+          <Loader2 v-if="isAnalyzing" class="spin" :size="15" />
+          {{ currentJob ? statusLabel(currentJob.status) : '空闲' }}
+        </span>
       </div>
 
-      <ol v-if="currentJob" class="agent-step-list">
-        <li v-for="step in currentJob.steps" :key="step.id" :class="['agent-step', step.status]">
-          <span class="agent-step-dot"></span>
+      <div v-if="currentJob" class="agent-console">
+        <section class="agent-overview">
           <div>
-            <strong>{{ step.label }}</strong>
-            <p>{{ step.detail || step.status }}</p>
+            <span>阶段</span>
+            <strong>{{ completedStepCount }} / {{ jobSteps.length }}</strong>
           </div>
-        </li>
-      </ol>
+          <div>
+            <span>工具调用</span>
+            <strong>{{ toolEvents.length }}</strong>
+          </div>
+          <div>
+            <span>证据</span>
+            <strong>{{ drawerEvidenceCount }}</strong>
+          </div>
+        </section>
+
+        <section class="agent-focus">
+          <div class="agent-focus-label">当前活动</div>
+          <strong>{{ activeAgentEvent ? `${activeAgentEvent.stepLabel} · ${eventKindLabel(activeAgentEvent)} · ${activeAgentEvent.label}` : activeStep?.label }}</strong>
+          <code v-if="activeAgentEvent?.target">{{ activeAgentEvent.target }}</code>
+          <p>{{ activeAgentEvent?.detail || activeStep?.detail || '等待下一步执行' }}</p>
+        </section>
+
+        <section class="agent-section">
+          <div class="agent-section-title">
+            <span>阶段时间线</span>
+            <b>{{ statusLabel(activeStep?.status ?? 'pending') }}</b>
+          </div>
+          <ol class="agent-stage-list">
+            <li v-for="step in jobSteps" :key="step.id" :class="['agent-stage', step.status]">
+              <span class="agent-stage-dot"></span>
+              <div class="agent-stage-main">
+                <div class="agent-stage-title">
+                  <strong>{{ step.label }}</strong>
+                  <span>{{ statusLabel(step.status) }}</span>
+                </div>
+                <p>{{ step.detail || statusLabel(step.status) }}</p>
+              </div>
+            </li>
+          </ol>
+        </section>
+
+        <section class="agent-section">
+          <div class="agent-section-title">
+            <span>内部执行事件</span>
+            <b>{{ drawerEvents.length }} 条</b>
+          </div>
+          <ol v-if="drawerEvents.length" class="agent-event-list">
+            <li v-for="event in drawerEvents" :key="`${event.stepLabel}-${event.id}`" :class="['agent-event', event.status, event.kind]">
+              <span class="agent-event-dot"></span>
+              <div class="agent-event-body">
+                <div class="agent-event-title">
+                  <strong>{{ event.stepLabel }} · {{ eventKindLabel(event) }} · {{ event.label }}</strong>
+                  <span>{{ statusLabel(event.status) }}</span>
+                </div>
+                <code v-if="event.target">{{ event.target }}</code>
+                <p>{{ event.detail || statusLabel(event.status) }}</p>
+              </div>
+            </li>
+          </ol>
+          <p v-else class="agent-muted">任务运行后，这里会显示 GitHub REST、clone、本地探索和 LangGraph 工具调用等内部动作。</p>
+        </section>
+
+        <section class="agent-section agent-evidence-link">
+          <span>最终报告会复用同一批探索记录</span>
+          <strong>{{ drawerExplorationCount }} 步探索</strong>
+        </section>
+      </div>
       <div v-else class="agent-empty">
         <Activity :size="28" />
-        <p>开始体检后，这里会显示解析仓库、读取 GitHub、clone、索引、LangGraph 评分、AI 审阅和保存报告的实时状态。</p>
+        <p>开始体检后，这里会显示阶段时间线、LangGraph 内部节点、只读工具调用和当前正在查看的目标文件。</p>
       </div>
     </aside>
 
@@ -695,7 +866,7 @@ onUnmounted(() => {
         <div class="guide-modal-header">
           <div>
             <h2>评分说明</h2>
-            <p>核心分来自本地只读代码证据；AI 分是独立审阅，不再使用“规则分 + 修正值”。</p>
+            <p>核心分来自 LangGraph 本地只读探索证据；AI 分是独立审阅，不再使用“规则分 + 修正值”。</p>
           </div>
           <button class="icon-button" type="button" title="关闭评分说明" @click="showScoringGuide = false">
             <X :size="18" />
@@ -705,7 +876,7 @@ onUnmounted(() => {
         <div class="guide-content">
           <section>
             <h3>核心 100 分</h3>
-            <p>系统 clone 公开仓库后只读扫描目录、配置、README、测试、CI、源码片段和安全信号，不安装依赖，不运行仓库代码。</p>
+            <p>系统 clone 公开仓库后，由 LangGraph 先规划探索，再调用 list_dir/read_file/grep/find_files 只读查看配置、README、测试、CI、源码层次和安全信号；索引摘要只做兜底，不安装依赖，不运行仓库代码。</p>
           </section>
 
           <section>
@@ -727,7 +898,7 @@ onUnmounted(() => {
 
           <section>
             <h3>AI 独立分</h3>
-            <p>AI 独立分不是“规则分 + 修正值”。系统会把本地只读证据包压缩给 AI，包括目录树、关键配置、测试/CI/文档/安全信号、少量脱敏源码片段和确定性评分摘要。AI 再按同样的六个维度独立给出 0-100 分、置信度和中文理由。这个分数只作为对照参考，不改变核心综合分。</p>
+            <p>AI 独立分不是“规则分 + 修正值”。系统会把本地只读证据包压缩给 AI，包括目录树、Agent 探索过程、关键配置、测试/CI/文档/安全信号、少量脱敏源码片段和核心评分摘要。AI 再按同样的六个维度独立给出 0-100 分、置信度和中文理由。这个分数只作为对照参考，不改变核心综合分。</p>
           </section>
 
           <section>

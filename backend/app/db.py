@@ -118,3 +118,11 @@ def list_reports(limit: int = 20) -> list[dict[str, Any]]:
             (limit,),
         ).fetchall()
     return [_row_to_report(row) for row in rows]
+
+
+def delete_report(report_id: int) -> bool:
+    init_db()
+    with _connect() as conn:
+        cursor = conn.execute("DELETE FROM reports WHERE id = ?", (report_id,))
+        conn.commit()
+    return cursor.rowcount > 0

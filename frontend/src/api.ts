@@ -22,6 +22,10 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     throw new Error(message)
   }
 
+  if (response.status === 204) {
+    return undefined as T
+  }
+
   return response.json() as Promise<T>
 }
 
@@ -63,4 +67,10 @@ export function listReports(): Promise<RecentReport[]> {
 
 export function getReport(id: number): Promise<ReportResponse> {
   return request(`/api/reports/${id}`)
+}
+
+export function deleteReport(id: number): Promise<void> {
+  return request(`/api/reports/${id}`, {
+    method: 'DELETE',
+  })
 }
